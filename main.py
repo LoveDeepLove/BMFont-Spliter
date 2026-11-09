@@ -46,6 +46,26 @@ cjk_ascii_punctuation_map = {
 }
 # Unity .fontsettings 中字符区块的起始行（可能是 serializedVersion 也可能是 index）
 yaml_char_section = "m_CharacterRects"
+# 支持的图片格式：扩展名 -> Pillow format
+export_image_formats = {"png": "PNG", "jpg": "JPEG", "tga": "TGA"}
+# TGA 写入时允许的图像模式，其余先转 RGBA
+tga_supported_modes = {"1", "L", "LA", "P", "RGB", "RGBA"}
+
+
+def save_image_file(image: Image.Image, path: Path, image_format: str) -> None:
+    """按目标格式显式保存：JPG 去掉 alpha，TGA 固定为左上原点。"""
+    if image_format == "JPEG":
+        if image.mode in ("RGBA", "LA", "P"):
+            image = image.convert("RGB")
+        image.save(path, format="JPEG")
+        return
+    if image_format == "TGA":
+        if image.mode not in tga_supported_modes:
+            image = image.convert("RGBA")
+        # descriptor 0x28：左上原点 + 8 位 alpha，与字体描述的像素坐标基准一致
+        image.save(path, format="TGA", orientation=1)
+        return
+    image.save(path, format=image_format)
 
 
 @dataclass
@@ -636,7 +656,7 @@ def fmt_num(value: float) -> str:
 def write_fnt_file(
     path: Path,
     font_name: str,
-    png_name: str,
+    atlas_name: str,
     placed: list[PlacedGlyph],
     atlas_size: tuple[int, int],
     space_width: int,
@@ -650,7 +670,7 @@ def write_fnt_file(
         "stretchH=0 smooth=1 aa=1 padding=0,0,0,0 spacing=0,0",
         f"common lineHeight={line_height} base=0 scaleW={atlas_w} scaleH={atlas_h} "
         "pages=1 packed=0",
-        f'page id=0 file="{png_name}"',
+        f'page id=0 file="{atlas_name}"',
         f"chars count={len(placed) + 1}",
         "",
         f"char  id=32  x=0  y=0  width=0  height=0  xoffset=0  yoffset=0  "
@@ -750,8 +770,13 @@ def generate_font_package(
     template_path: Path | None = None,
     space_width: int | None = None,
     line_height: int | None = None,
+    atlas_format: str = "png",
 ) -> PackResult:
-    """把散图打包为图集（png）并按需输出 .fnt / .fontsettings。"""
+    """把散图打包为图集（png / tga）并按需输出 .fnt / .fontsettings。"""
+    atlas_format = atlas_format.lower()
+    if atlas_format not in {"png", "tga"}:
+        raise ValueError("图集格式仅支持 png 或 tga。")
+
     glyphs, warnings = load_glyph_images(input_dir)
     if not glyphs:
         raise ValueError("所选目录下没有可用的图片（支持 png/jpg/jpeg/bmp）。")
@@ -762,8 +787,8 @@ def generate_font_package(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     atlas = build_atlas_image(glyphs, placed, atlas_size)
-    atlas_path = output_dir / f"{font_name}.png"
-    atlas.save(atlas_path, format="PNG")
+    atlas_path = output_dir / f"{font_name}.{atlas_format}"
+    save_image_file(atlas, atlas_path, export_image_formats[atlas_format])
 
     if space_width is None:
         space_width = max(g.image.width for g in glyphs)
@@ -799,6 +824,10 @@ def generate_font_package(
         write_fontsettings_file(
             fontsettings_path, font_name, template_text, placed, atlas_size
         )
+        if atlas_format == "tga":
+            warnings.append(
+                "图集为 .tga：材质仍指向原来的贴图，需要在 Unity 中把 Default Material 的贴图槽换成本次输出的 .tga。"
+            )
 
     return PackResult(
         atlas_path, fnt_path, fontsettings_path, len(glyphs), atlas_size, warnings
@@ -813,10 +842,10 @@ def split_font_images(
 ) -> tuple[int, FontDescriptor]:
     """执行拆图逻辑，返回 (成功导出的图片数量, 字体描述信息)。"""
     export_format = export_format.lower()
-    if export_format not in {"png", "jpg"}:
-        raise ValueError("仅支持 png 或 jpg 格式导出。")
+    if export_format not in export_image_formats:
+        raise ValueError("仅支持 png、jpg 或 tga 格式导出。")
 
-    image_format = "PNG" if export_format == "png" else "JPEG"
+    image_format = export_image_formats[export_format]
     output_dir.mkdir(parents=True, exist_ok=True)
     saved_count = 0
     name_counter: dict[str, int] = {}
@@ -860,9 +889,7 @@ def split_font_images(
                 filename = f"{base_name}_{index}.{export_format}"
 
             # 显式指定格式，避免 Pillow 依赖扩展名推断失败
-            if image_format == "JPEG" and crop_img.mode in ("RGBA", "LA", "P"):
-                crop_img = crop_img.convert("RGB")
-            crop_img.save(output_dir / filename, format=image_format)
+            save_image_file(crop_img, output_dir / filename, image_format)
             saved_count += 1
 
     return saved_count, descriptor
@@ -887,7 +914,7 @@ class FontSplitterApp:
 
         # 拆分页
         self.descriptor_var = tk.StringVar()
-        self.png_var = tk.StringVar()
+        self.atlas_var = tk.StringVar()
         self.output_var = tk.StringVar()
         self.export_format_var = tk.StringVar(value="png")
         self.status_var = tk.StringVar(
@@ -903,6 +930,7 @@ class FontSplitterApp:
         self.pack_fnt_var = tk.BooleanVar(value=True)
         self.pack_fontsettings_var = tk.BooleanVar(value=True)
         self.pack_template_var = tk.StringVar()
+        self.atlas_format_var = tk.StringVar(value="png")
         self.pack_status_var = tk.StringVar(
             value="选择散图目录：文件名即字符，如 万.png、A.png、U+4E07.png。"
         )
@@ -926,7 +954,7 @@ class FontSplitterApp:
         tab.grid_columnconfigure(1, weight=1)
 
         self._build_row(tab, "字体描述文件:", self.descriptor_var, self.select_descriptor_file, 0)
-        self._build_row(tab, "PNG 文件:", self.png_var, self.select_png_file, 1)
+        self._build_row(tab, "图集文件:", self.atlas_var, self.select_atlas_file, 1)
         self._build_row(tab, "输出目录:", self.output_var, self.select_output_dir, 2)
         self._build_output_warning_row(tab, 3)
         self._build_format_row(tab, 4)
@@ -975,9 +1003,23 @@ class FontSplitterApp:
         ).pack(side="left", padx=(18, 0))
         ttk.Label(tab, text="输出文件:").grid(row=5, column=0, padx=10, pady=8, sticky="w")
 
+        atlas_options = ttk.Frame(tab)
+        atlas_options.grid(row=6, column=1, padx=10, pady=6, sticky="w")
+        ttk.Radiobutton(
+            atlas_options, text="PNG", value="png", variable=self.atlas_format_var
+        ).pack(side="left")
+        ttk.Radiobutton(
+            atlas_options, text="TGA", value="tga", variable=self.atlas_format_var
+        ).pack(side="left", padx=(16, 0))
+        ttk.Label(atlas_options, text="32 位 BGRA / 左上原点", foreground="#6b7280").pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Label(tab, text="图集格式:").grid(row=6, column=0, padx=10, pady=8, sticky="w")
+
         hint = (
-            "提示：只写入 <字体名>.png / .fnt / .fontsettings，同名文件会被覆盖。"
+            "提示：只写入 <字体名>.<图集格式> / .fnt / .fontsettings，同名文件会被覆盖。"
             "Unity 模板可选，建议选择同目录下现有的 .fontsettings，以沿用引擎自定义的 YAML 头与材质引用。"
+            "若图集改用 TGA，需在 Unity 中把材质贴图换成新文件。"
         )
         ttk.Label(
             tab,
@@ -986,10 +1028,10 @@ class FontSplitterApp:
             wraplength=680,
             anchor="w",
             justify="left",
-        ).grid(row=6, column=0, columnspan=3, padx=10, pady=(2, 6), sticky="we")
+        ).grid(row=7, column=0, columnspan=3, padx=10, pady=(2, 6), sticky="we")
 
         ttk.Button(tab, text="开始打包", width=15, command=self.run_pack).grid(
-            row=7, column=1, padx=10, pady=10, sticky="w"
+            row=8, column=1, padx=10, pady=10, sticky="w"
         )
 
         ttk.Label(
@@ -999,7 +1041,7 @@ class FontSplitterApp:
             anchor="w",
             wraplength=680,
             justify="left",
-        ).grid(row=8, column=0, columnspan=3, padx=10, pady=(0, 10), sticky="we")
+        ).grid(row=9, column=0, columnspan=3, padx=10, pady=(0, 10), sticky="we")
 
     def _build_row(
         self,
@@ -1050,6 +1092,9 @@ class FontSplitterApp:
         jpg_radio = ttk.Radiobutton(frame, text="JPG", value="jpg", variable=self.export_format_var)
         jpg_radio.pack(side="left", padx=(16, 0))
 
+        tga_radio = ttk.Radiobutton(frame, text="TGA", value="tga", variable=self.export_format_var)
+        tga_radio.pack(side="left", padx=(16, 0))
+
     def select_descriptor_file(self) -> None:
         path = filedialog.askopenfilename(
             title="选择字体描述文件",
@@ -1065,20 +1110,25 @@ class FontSplitterApp:
             suffix = Path(path).suffix.lower()
             if suffix == ".fontsettings":
                 self.status_var.set(
-                    "已选择 Unity .fontsettings（文本格式），请再选择配套的图集 png。"
+                    "已选择 Unity .fontsettings（文本格式），请再选择配套的图集图片。"
                 )
             elif suffix == ".fnt":
-                self.status_var.set("已选择 BMFont .fnt，请再选择配套的图集 png。")
+                self.status_var.set("已选择 BMFont .fnt，请再选择配套的图集图片。")
             else:
                 self.status_var.set("已选择字体描述文件，将按内容自动识别格式。")
 
-    def select_png_file(self) -> None:
+    def select_atlas_file(self) -> None:
         path = filedialog.askopenfilename(
-            title="选择 PNG 文件",
-            filetypes=[("PNG 图片", "*.png"), ("所有文件", "*.*")],
+            title="选择图集文件",
+            filetypes=[
+                ("图集图片", "*.png *.tga *.jpg *.jpeg *.bmp"),
+                ("PNG 图片", "*.png"),
+                ("TGA 图片", "*.tga"),
+                ("所有文件", "*.*"),
+            ],
         )
         if path:
-            self.png_var.set(path)
+            self.atlas_var.set(path)
 
     def select_output_dir(self) -> None:
         path = filedialog.askdirectory(title="选择输出目录")
@@ -1165,6 +1215,7 @@ class FontSplitterApp:
                 template_path=template_path,
                 space_width=space_width,
                 line_height=line_height,
+                atlas_format=self.atlas_format_var.get(),
             )
         except Exception as e:
             messagebox.showerror("执行失败", f"打包失败：{e}")
@@ -1189,31 +1240,31 @@ class FontSplitterApp:
 
     def run_split(self) -> None:
         descriptor_value = self.descriptor_var.get().strip()
-        png_value = self.png_var.get().strip()
+        atlas_value = self.atlas_var.get().strip()
         output_value = self.output_var.get().strip()
         export_format = self.export_format_var.get().strip().lower()
 
-        if not descriptor_value or not png_value or not output_value:
+        if not descriptor_value or not atlas_value or not output_value:
             messagebox.showwarning(
-                "参数不完整", "请先选择字体描述文件、png 文件和输出目录。"
+                "参数不完整", "请先选择字体描述文件、图集文件和输出目录。"
             )
             return
 
         descriptor_path = Path(descriptor_value)
-        png_path = Path(png_value)
+        atlas_path = Path(atlas_value)
         output_dir = Path(output_value)
 
         if not descriptor_path.is_file():
             messagebox.showerror("文件不存在", "字体描述文件路径无效。")
             return
-        if not png_path.is_file():
-            messagebox.showerror("文件不存在", "png 文件路径无效。")
+        if not atlas_path.is_file():
+            messagebox.showerror("文件不存在", "图集文件路径无效。")
             return
 
         try:
             clear_output_dir(output_dir)
             count, descriptor = split_font_images(
-                descriptor_path, png_path, output_dir, export_format
+                descriptor_path, atlas_path, output_dir, export_format
             )
         except Exception as e:
             messagebox.showerror("执行失败", f"拆分失败：{e}")

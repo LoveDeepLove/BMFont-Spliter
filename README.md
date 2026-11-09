@@ -10,7 +10,8 @@
 ## 功能特性
 
 - **双标签页**：`拆分：字体 → 图片` / `打包：图片 → 字体`，互不干扰。
-- **图形界面**：拆分支持导出 **PNG** 或 **JPG**（默认 PNG）。
+- **多图片格式**：拆分可导出 **PNG / JPG / TGA**；图集输入支持 **png / tga / jpg / bmp**（按内容自动识别）。
+- **图集格式可选**：打包时图集可输出 **PNG** 或 **TGA**（32 位 BGRA、左上原点），`.fnt` 的 `page` 文件名自动跟随。
 - **两种描述格式**：自动按文件内容识别 `.fnt`（BMFont 文本）与 `.fontsettings`（Unity 文本序列化字体），无需手动切换格式。
 - **打包输出**：MaxRects 装箱生成 2 的幂图集，可同时输出 `.fnt` 与 `.fontsettings`，字段与主流 BMFont 工具一致。
 - **字符命名**：根据 `char id` 还原为文件名；兼容 `unicode=0/1`、ANSI/GBK 双字节、以及「标为 ANSI 但实际为 Unicode 码点」的字体。
@@ -51,10 +52,12 @@ pip install Pillow
 在「拆分」页依次选择：
 
 - **字体描述文件**：BMFont **文本**格式 `.fnt`，或 Unity 文本序列化的 `.fontsettings`。
-- **PNG 文件**：与之配套的图集（`.fnt` 对应 `page` 行引用的图；`.fontsettings` 对应 `m_DefaultMaterial` 所用材质里的贴图，通常为同名字体图）。
+- **图集文件**：与之配套的图集（`.fnt` 对应 `page` 行引用的图；`.fontsettings` 对应 `m_DefaultMaterial` 所用材质里的贴图，通常为同名字体图）。支持 **png / tga / jpg / bmp**，按内容自动识别，与扩展名无关。
 - **输出目录**：仅用于本次导出；**会先被清空再写入**。
 
-再选择导出格式 **PNG** 或 **JPG**，点击 **开始拆分**。
+再选择导出格式 **PNG**、**JPG** 或 **TGA**，点击 **开始拆分**。
+
+> TGA 是 32 位 BGRA、**左上原点**（descriptor `0x28`），与字体描述文件的坐标基准一致；作为输入时也会按 TGA 自身的原点标记自动翻正。
 
 宽度或高度为 `0` 的字符（如空格占位、以及 Unity 字体中未配置的槽位）会被跳过，不生成图片。
 
@@ -66,11 +69,12 @@ pip install Pillow
    - `万.png` → U+4E07，`A.png` → U+0041
    - `U+4E07.png` / `uni4E07.png` / `0x4E07.png` 亦可
    - 多字符文件名（如 `地主.png`）按首字符处理，并给出提示
-2. **输出目录**：写入 `<字体名>.png` 及所选描述文件，**同名文件会被覆盖**（不会清空目录）。
+2. **输出目录**：写入 `<字体名>.<图集格式>` 及所选描述文件，**同名文件会被覆盖**（不会清空目录）。
 3. **字体名称**：决定输出文件名，也是 `.fnt` 的 `face` 与 `.fontsettings` 的 `m_Name`。
 4. **空格宽度 / 行高**：留空则自动取「最宽图宽」与「最高图高」。
 5. **输出文件**：可勾选 `.fnt`、`.fontsettings`（可同时输出）。
-6. **Unity 模板**（可选）：建议选择同目录下现有的 `.fontsettings`，用于沿用引擎自定义的 YAML 头、`serializedVersion` 与材质引用。
+6. **图集格式**：`PNG`（默认，体积小）或 `TGA`（32 位 BGRA 无压缩、左上原点，便于接入按通道处理的管线）。
+7. **Unity 模板**（可选）：建议选择同目录下现有的 `.fontsettings`，用于沿用引擎自定义的 YAML 头、`serializedVersion` 与材质引用。
 
 图集尺寸按总面积推导 2 的幂（如 256×256、512×256），放不下时自动翻倍；每格图四周留 1px 空白（共 2px 间隔），并换算为 `xoffset/yoffset`。
 
@@ -79,7 +83,7 @@ pip install Pillow
 ```text
 info face="<字体名>" size=0 ... charset="ANSI" unicode=0
 common lineHeight=<行高> base=0 scaleW=<图宽> scaleH=<图高> pages=1 packed=0
-page id=0 file="<字体名>.png"
+page id=0 file="<字体名>.<图集格式>"
 chars count=<字形数 + 1>
 char id=32 ... xadvance=<空格宽度>       # 自动补一个空格
 char id=<字符编码> x/y/width/height ... xoffset=1 yoffset=1 xadvance=<图宽>
@@ -162,6 +166,8 @@ pyinstaller --noconfirm --clean --onefile --windowed -n "BMFont拆分工具v1.0.
 - **拆分**会清空输出目录：请专门新建空文件夹，勿指向桌面、文档根目录等。
 - **打包**只覆盖同名文件，不会清空目录。
 - **JPG 无透明通道**：带 Alpha 的图块导出 JPG 时会转为 RGB，可能与 PNG 观感不同。
+- **TGA 为无压缩**：体积约为 PNG 的数倍（512×512 约 1 MB）；写入为 32 位 BGRA + 左上原点，读取时按原点标记自动翻正。
+- **TGA 图集 + `.fontsettings`**：材质里记录的仍是原贴图引用，需要在 Unity 中把 Default Material 的贴图换成新 `.tga`。
 - 文件名尽量贴近「字符含义」，极端情况下仍会使用 `U+XXXX` 等形式以保证可写、不冲突。
 - `.fontsettings` 打包时若未指定模板，`m_DefaultMaterial` 为空，需要进 Unity 手动指定材质；引擎使用了自定义 `%TAG`（如 `tag:yousandi.cn,2023`）时**必须**选择现有 `.fontsettings` 作模板。
 - 工具的 `.meta` 文件不由本工具生成，交给 Unity 导入时自动创建。
